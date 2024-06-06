@@ -1,34 +1,73 @@
 import socket
 import random
 import string
-import pyperclip
+import logging
 from model import Message
-from serializer import serialize,extract_messages_from_buffer
+from serializer import serialize, extract_messages_from_buffer
 from savefile import makefile
 
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def random_id():
+    """
+    Generate a random ID consisting of 10 alphanumeric characters.
+    """
     charset = string.ascii_letters + string.digits
     return ''.join(random.choice(charset) for _ in range(10))
 
 def read_message(conn, buffer):
+    """
+    Read a message from the connection and manage the buffer.
+
+    Parameters:
+    - conn: socket connection object
+    - buffer: bytearray to store incoming data
+
+    Returns:
+    - The first complete message from the buffer
+    """
+    logging.debug("Reading message from connection")
     tmp_buffer = conn.recv(1024)
     if not tmp_buffer:
+        logging.error("Connection closed by the server")
         raise ConnectionError("Connection closed by the server")
-    
+
     buffer.extend(tmp_buffer)
     message_queue, incomplete_buffer = extract_messages_from_buffer(buffer)
-    
-    # Clear buffer and store incomplete part
+
     buffer.clear()
     buffer.extend(incomplete_buffer)
-    
-    return message_queue[0]
+
+    if message_queue:
+        logging.debug("Message read successfully")
+        return message_queue[0]
+    return None
 
 def send_message(conn, msg):
+    """
+    Serialize and send a message through the connection.
+
+    Parameters:
+    - conn: socket connection object
+    - msg: Message object to be sent
+    """
+    logging.debug(f"Sending message: {msg}")
     data = serialize(msg)
     conn.sendall(data)
 
 def make_message(msg_type, sender_id, receiver_id):
+    """
+    Create a message with a random ID.
+
+    Parameters:
+    - msg_type: type of the message
+    - sender_id: ID of the sender
+    - receiver_id: ID of the receiver
+
+    Returns:
+    - Message object
+    """
     return Message(
         type=msg_type,
         sender_id=sender_id,
@@ -37,61 +76,63 @@ def make_message(msg_type, sender_id, receiver_id):
     )
 
 def handle(conn):
-    pyperclip.copy("")
-    
+    """
+    Handle the connection and process messages to build topology.
+
+    Parameters:
+    - conn: socket connection object
+    """
+    logging.info("Handling connection")
     buffer = bytearray()
     queue = []
     topology = {}
     visited = {}
     my_id = ""
 
-    # Handle the init message to get the ID of our node.
     while True:
         try:
             msg = read_message(conn, buffer)
         except Exception as e:
-            print("Error:", e)
+            logging.error(f"Error reading message: {e}")
             continue
-        
-        if msg.type == "init":
-            print("Init message received")
+
+        if msg and msg.type == "init":
+            logging.info("Init message received")
             my_id = msg.receiver_id
-            print("My ID:", my_id)
+            logging.info(f"My ID: {my_id}")
             break
-    
+
     queue.append(my_id)
     init_query = make_message("query", my_id, my_id)
     visited[my_id] = True
     send_message(conn, init_query)
-    
+
     while queue:
         try:
             msg = read_message(conn, buffer)
         except Exception as e:
-            print("Error:", e)
-            pyperclip.copy(buffer.decode())
+            logging.error(f"Error reading message: {e}")
             continue
-        
-        print("Received num of neighbors:", len(msg.n))
-        print("Receiver:", msg.receiver_id)
-        print("Sender:", msg.sender_id)
 
-        node_id = queue.pop(0)
-        topology[node_id] = msg.n
-        
-        for neighbor in msg.n:
-            if not visited.get(neighbor):
-                queue.append(neighbor)
-                query_rpc = make_message("query", my_id, neighbor)
-                
-                print("Sender:", query_rpc.sender_id)
-                print("Receiver:", query_rpc.receiver_id)
-                
-                visited[neighbor] = True
-                send_message(conn, query_rpc)
-    
-    print("Topology is created.")
-    
+        if msg:
+            logging.info(f"Received num of neighbors: {len(msg.n)}")
+            logging.info(f"Receiver: {msg.receiver_id}, Sender: {msg.sender_id}")
+
+            node_id = queue.pop(0)
+            topology[node_id] = msg.n
+
+            for neighbor in msg.n:
+                if not visited.get(neighbor):
+                    queue.append(neighbor)
+                    query_rpc = make_message("query", my_id, neighbor)
+
+                    logging.info(f"Sender: {query_rpc.sender_id}, Receiver: {query_rpc.receiver_id}")
+
+                    visited[neighbor] = True
+                    send_message(conn, query_rpc)
+
+    logging.info("Topology is created")
+
     final_msg = Message(
         type="topology",
         sender_id=my_id,
@@ -99,12 +140,13 @@ def handle(conn):
         msg_id=random_id(),
         topology=topology
     )
-    
+
     send_message(conn, final_msg)
 
 def main():
-    # for docker linux conntinter connections
-    # host = '172.17.0.1'
+    """
+    Main function to establish connection and handle it.
+    """
     host = 'localhost'
     port = 12080
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
